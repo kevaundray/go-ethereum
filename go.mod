@@ -2,7 +2,7 @@ module github.com/ethereum/go-ethereum
 
 go 1.18
 
-replace github.com/protolambda/go-kzg => github.com/kevaundray/go-kzg v0.2.0
+replace github.com/protolambda/go-kzg => github.com/kevaundray/go-kzg v0.2.1-0.20221207231525-1411818727c7
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/storage/azblob v0.3.0
@@ -86,7 +86,7 @@ require (
 	github.com/consensys/bavard v0.1.13 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.2 // indirect
 	github.com/crate-crypto/go-ipa v0.0.0-20220523130400-f11357ae11c7 // indirect
-	github.com/crate-crypto/go-proto-danksharding-crypto v0.0.0-20221128204026-10745debcfbe // indirect
+	github.com/crate-crypto/go-proto-danksharding-crypto v0.0.0-20221207231128-887c0fd39e42 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.0.1 // indirect
 	github.com/deepmap/oapi-codegen v1.8.2 // indirect
 	github.com/dlclark/regexp2 v1.4.1-0.20201116162257-a2a8dda75c91 // indirect
