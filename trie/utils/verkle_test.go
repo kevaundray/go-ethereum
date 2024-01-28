@@ -18,11 +18,79 @@ package utils
 
 import (
 	"bytes"
+	"encoding/hex"
 	"testing"
 
 	"github.com/gballet/go-verkle"
 	"github.com/holiman/uint256"
 )
+
+func TestTreeKeyAddress0(t *testing.T) {
+	var (
+		address = []byte{0x00}
+	)
+
+	expectedVersionKey := "bf101a6e1c8e83c11bd203a582c7981b91097ec55cbd344ce09005c1f26d1900"
+	if expectedVersionKey != hex.EncodeToString(VersionKey(address)) {
+		t.Fatal("Unmatched version key")
+	}
+}
+
+func TestTreeKeyAddressSmoke(t *testing.T) {
+	var (
+		address = []byte{
+			1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+			11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+			21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+			31, 32}
+		treeIndex = []byte{
+			33, 34, 35, 36, 37, 38, 39, 40,
+			41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
+			51, 52, 53, 54, 55, 56, 57, 58, 59, 60,
+			61, 62, 63, 64}
+		subIndex = byte(0)
+	)
+
+	treeIndexU256 := uint256.NewInt(0)
+	treeIndexU256.SetBytes32(treeIndex)
+
+	expectedHex := "76a014d14e338c57342cda5187775c6b75e7f0ef292e81b176c7a5a700273700"
+
+	gotBytes := GetTreeKey(address, treeIndexU256, subIndex)
+	gotHex := hex.EncodeToString(gotBytes)
+
+	if expectedHex != gotHex {
+		t.Fatalf("Unmatched tree key: expected %s, got %s", expectedHex, gotHex)
+	}
+}
+
+func TestTreeKeyAddressBesuInteropDelete(t *testing.T) {
+	var (
+		subIndex = byte(0)
+	)
+
+	address, err := hex.DecodeString("003f9549040250ec5cdef31947e5213edee80ad2d5bba35c9e48246c5d9213d6")
+	if err != nil {
+		t.Fatalf("Failed to decode address: %v", err)
+	}
+
+	treeIndexBytes, err := hex.DecodeString("004C6CE0115457AC1AB82968749EB86ED2D984743D609647AE88299989F91271")
+	if err != nil {
+		t.Fatalf("Failed to decode tree index: %v", err)
+	}
+
+	treeIndexU256 := uint256.NewInt(0)
+	treeIndexU256.SetBytes32(treeIndexBytes)
+
+	expectedHex := "ff6e8f1877fd27f91772a4cec41d99d2f835d7320e929b8d509c5fa7ce095c00"
+
+	gotBytes := GetTreeKey(address, treeIndexU256, subIndex)
+	gotHex := hex.EncodeToString(gotBytes)
+
+	if expectedHex != gotHex {
+		t.Fatalf("Unmatched tree key: expected %s, got %s", expectedHex, gotHex)
+	}
+}
 
 func TestTreeKey(t *testing.T) {
 	var (
