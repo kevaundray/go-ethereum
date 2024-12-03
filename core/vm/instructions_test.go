@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
@@ -116,7 +117,7 @@ func testTwoOperandOp(t *testing.T, tests []TwoOperandTestcase, opFn executionFu
 		expected := new(uint256.Int).SetBytes(common.Hex2Bytes(test.Expected))
 		stack.push(x)
 		stack.push(y)
-		opFn(&pc, evmInterpreter, &ScopeContext{nil, stack, nil})
+		opFn(&pc, evmInterpreter, &ScopeContext{nil, stack, nil, nil})
 		if len(stack.data) != 1 {
 			t.Errorf("Expected one item on stack after %v, got %d: ", name, len(stack.data))
 		}
@@ -231,12 +232,201 @@ func TestAddMod(t *testing.T) {
 		stack.push(z)
 		stack.push(y)
 		stack.push(x)
-		opAddmod(&pc, evmInterpreter, &ScopeContext{nil, stack, nil})
+		opAddmod(&pc, evmInterpreter, &ScopeContext{nil, stack, nil, nil})
 		actual := stack.pop()
 		if actual.Cmp(expected) != 0 {
 			t.Errorf("Testcase %d, expected  %x, got %x", i, expected, actual)
 		}
 	}
+}
+
+func TestSetupModX(t *testing.T) {
+	var (
+		env            = NewEVM(BlockContext{}, TxContext{}, nil, params.TestChainConfig, Config{})
+		stack          = newstack()
+		mem            = NewMemory()
+		evmInterpreter = NewEVMInterpreter(env)
+		pc             = uint64(0)
+		bigIntContexts = newBigIntCtxAllocations()
+	)
+
+	env.interpreter = evmInterpreter
+	mem.Resize(64)
+
+	scopeContext := &ScopeContext{mem, stack, nil, bigIntContexts}
+
+	// First we need to store the modulus in memory using MSTORE
+	// at pointer index `0`
+	modulus := new(uint256.Int).SetUint64(17)
+	stack.push(modulus)
+	stack.push(new(uint256.Int))
+	opMstore(&pc, evmInterpreter, scopeContext)
+
+	id := new(uint256.Int).SetBytes(common.Hex2Bytes("01"))
+	modOffset := new(uint256.Int).SetBytes(common.Hex2Bytes("00"))    // We stored it at pointer index `0`
+	modSizeBytes := new(uint256.Int).SetBytes(common.Hex2Bytes("08")) // 17 has 8 bytes
+	allocSize := new(uint256.Int).SetBytes(common.Hex2Bytes("255"))   // We use an allocation size of 255
+	stack.push(allocSize)
+	stack.push(modSizeBytes)
+	stack.push(modOffset)
+	stack.push(id)
+
+	_, err := opSetupx(&pc, evmInterpreter, scopeContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// TODO add some asserts on the BigInt context
+}
+
+func TestLoadStoreX(t *testing.T) {
+	var (
+		env            = NewEVM(BlockContext{}, TxContext{}, nil, params.TestChainConfig, Config{})
+		stack          = newstack()
+		mem            = NewMemory()
+		evmInterpreter = NewEVMInterpreter(env)
+		pc             = uint64(0)
+		bigIntContexts = newBigIntCtxAllocations()
+	)
+
+	env.interpreter = evmInterpreter
+	mem.Resize(64)
+
+	scopeContext := &ScopeContext{mem, stack, nil, bigIntContexts}
+
+	// First we need to store the modulus in memory using MSTORE
+	// at pointer index `0`
+	modulus := new(uint256.Int).SetUint64(17)
+	stack.push(modulus)
+	stack.push(new(uint256.Int))
+	opMstore(&pc, evmInterpreter, scopeContext)
+
+	id := new(uint256.Int).SetUint64(0)
+	modOffset := new(uint256.Int).SetUint64(0)
+	modSizeBytes := new(uint256.Int).SetUint64(32)
+	allocSize := new(uint256.Int).SetUint64(255)
+	stack.push(allocSize)
+	stack.push(modSizeBytes)
+	stack.push(modOffset)
+	stack.push(id)
+
+	_, err := opSetupx(&pc, evmInterpreter, scopeContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Now we want to test Load and Store in EVMMAX
+	// Lets load values into memory
+	stack.push(new(uint256.Int).SetUint64(2))
+	stack.push(new(uint256.Int))
+	opMstore(&pc, evmInterpreter, scopeContext)
+
+	// EVMMAX Store
+	stack.push(new(uint256.Int).SetOne()) // count
+	stack.push(new(uint256.Int))          // dest
+	stack.push(new(uint256.Int))          // source
+	_, err = opStorex(&pc, evmInterpreter, scopeContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Clear the memory, so that we can check that it gets loaded properly by LoadX
+	mem.Set32(0, &uint256.Int{})
+
+	// EVMMAX Load
+	stack.push(new(uint256.Int).SetOne()) // count
+	stack.push(new(uint256.Int))          // dest
+	stack.push(new(uint256.Int))          // source
+	_, err = opLoadx(&pc, evmInterpreter, scopeContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	memCopiedValue := mem.GetPtr(0, 32)
+	expected := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}
+	if !slices.Equal(memCopiedValue, expected) {
+		t.Fatal("A store and then a load, does not copy the same value into memory")
+	}
+}
+
+func TestArithModX(t *testing.T) {
+	var (
+		env            = NewEVM(BlockContext{}, TxContext{}, nil, params.TestChainConfig, Config{})
+		stack          = newstack()
+		mem            = NewMemory()
+		evmInterpreter = NewEVMInterpreter(env)
+		pc             = uint64(0)
+		bigIntContexts = newBigIntCtxAllocations()
+	)
+
+	env.interpreter = evmInterpreter
+	mem.Resize(64)
+
+	scopeContext := &ScopeContext{mem, stack, nil, bigIntContexts}
+
+	// First we need to store the modulus in memory using MSTORE
+	// at pointer index `0`
+	modulus := new(uint256.Int).SetUint64(17)
+	stack.push(modulus)
+	stack.push(new(uint256.Int))
+	opMstore(&pc, evmInterpreter, scopeContext)
+
+	id := new(uint256.Int).SetUint64(0)
+	modOffset := new(uint256.Int).SetUint64(0)
+	modSizeBytes := new(uint256.Int).SetUint64(32)
+	allocSize := new(uint256.Int).SetUint64(255)
+	stack.push(allocSize)
+	stack.push(modSizeBytes)
+	stack.push(modOffset)
+	stack.push(id)
+
+	_, err := opSetupx(&pc, evmInterpreter, scopeContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// memory[0] = 2
+	stack.push(new(uint256.Int).SetUint64(2))
+	stack.push(new(uint256.Int))
+	opMstore(&pc, evmInterpreter, scopeContext)
+	
+	// memory[1] = 3
+	// The next index is 32 bytes spaced
+	stack.push(new(uint256.Int).SetUint64(3))
+	stack.push(new(uint256.Int).SetUint64(32))
+	opMstore(&pc, evmInterpreter, scopeContext)
+
+	// EVMMAX Store
+	stack.push(new(uint256.Int).SetUint64(2)) // count
+	stack.push(new(uint256.Int))          // dest
+	stack.push(new(uint256.Int))          // source
+	_, err = opStorex(&pc, evmInterpreter, scopeContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	contract := &Contract{}
+	// 
+	
+
+	_, err = opAddmodx(&pc, evmInterpreter, scopeContext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	// EVMMAX Load
+	// stack.push(new(uint256.Int).SetOne()) // count
+	// stack.push(new(uint256.Int))          // dest
+	// stack.push(new(uint256.Int))          // source
+	// _, err = opLoadx(&pc, evmInterpreter, scopeContext)
+	// if err != nil {
+	// 	t.Fatal(err)
+	// }
+
+	// memCopiedValue := mem.GetPtr(0, 32)
+	// expected := []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2}
+	// if !slices.Equal(memCopiedValue, expected) {
+	// 	t.Fatal("A store and then a load, does not copy the same value into memory")
+	// }
 }
 
 // utility function to fill the json-file with testcases
@@ -258,7 +448,7 @@ func TestWriteExpectedValues(t *testing.T) {
 			y := new(uint256.Int).SetBytes(common.Hex2Bytes(param.y))
 			stack.push(x)
 			stack.push(y)
-			opFn(&pc, interpreter, &ScopeContext{nil, stack, nil})
+			opFn(&pc, interpreter, &ScopeContext{nil, stack, nil, nil})
 			actual := stack.pop()
 			result[i] = TwoOperandTestcase{param.x, param.y, fmt.Sprintf("%064x", actual)}
 		}
@@ -294,7 +484,7 @@ func opBenchmark(bench *testing.B, op executionFunc, args ...string) {
 	var (
 		env            = NewEVM(BlockContext{}, TxContext{}, nil, params.TestChainConfig, Config{})
 		stack          = newstack()
-		scope          = &ScopeContext{nil, stack, nil}
+		scope          = &ScopeContext{nil, stack, nil, nil}
 		evmInterpreter = NewEVMInterpreter(env)
 	)
 
@@ -545,13 +735,13 @@ func TestOpMstore(t *testing.T) {
 	v := "abcdef00000000000000abba000000000deaf000000c0de00100000000133700"
 	stack.push(new(uint256.Int).SetBytes(common.Hex2Bytes(v)))
 	stack.push(new(uint256.Int))
-	opMstore(&pc, evmInterpreter, &ScopeContext{mem, stack, nil})
+	opMstore(&pc, evmInterpreter, &ScopeContext{mem, stack, nil, nil})
 	if got := common.Bytes2Hex(mem.GetCopy(0, 32)); got != v {
 		t.Fatalf("Mstore fail, got %v, expected %v", got, v)
 	}
 	stack.push(new(uint256.Int).SetUint64(0x1))
 	stack.push(new(uint256.Int))
-	opMstore(&pc, evmInterpreter, &ScopeContext{mem, stack, nil})
+	opMstore(&pc, evmInterpreter, &ScopeContext{mem, stack, nil, nil})
 	if common.Bytes2Hex(mem.GetCopy(0, 32)) != "0000000000000000000000000000000000000000000000000000000000000001" {
 		t.Fatalf("Mstore failed to overwrite previous value")
 	}
@@ -575,7 +765,7 @@ func BenchmarkOpMstore(bench *testing.B) {
 	for i := 0; i < bench.N; i++ {
 		stack.push(value)
 		stack.push(memStart)
-		opMstore(&pc, evmInterpreter, &ScopeContext{mem, stack, nil})
+		opMstore(&pc, evmInterpreter, &ScopeContext{mem, stack, nil, nil})
 	}
 }
 
@@ -590,7 +780,7 @@ func TestOpTstore(t *testing.T) {
 		to             = common.Address{1}
 		contractRef    = contractRef{caller}
 		contract       = NewContract(contractRef, AccountRef(to), new(uint256.Int), 0)
-		scopeContext   = ScopeContext{mem, stack, contract}
+		scopeContext   = ScopeContext{mem, stack, contract, nil}
 		value          = common.Hex2Bytes("abcdef00000000000000abba000000000deaf000000c0de00100000000133700")
 	)
 
@@ -638,7 +828,7 @@ func BenchmarkOpKeccak256(bench *testing.B) {
 	for i := 0; i < bench.N; i++ {
 		stack.push(uint256.NewInt(32))
 		stack.push(start)
-		opKeccak256(&pc, evmInterpreter, &ScopeContext{mem, stack, nil})
+		opKeccak256(&pc, evmInterpreter, &ScopeContext{mem, stack, nil, nil})
 	}
 }
 
@@ -733,7 +923,7 @@ func TestRandom(t *testing.T) {
 			pc             = uint64(0)
 			evmInterpreter = env.interpreter
 		)
-		opRandom(&pc, evmInterpreter, &ScopeContext{nil, stack, nil})
+		opRandom(&pc, evmInterpreter, &ScopeContext{nil, stack, nil, nil})
 		if len(stack.data) != 1 {
 			t.Errorf("Expected one item on stack after %v, got %d: ", tt.name, len(stack.data))
 		}
@@ -775,7 +965,7 @@ func TestBlobHash(t *testing.T) {
 			evmInterpreter = env.interpreter
 		)
 		stack.push(uint256.NewInt(tt.idx))
-		opBlobHash(&pc, evmInterpreter, &ScopeContext{nil, stack, nil})
+		opBlobHash(&pc, evmInterpreter, &ScopeContext{nil, stack, nil, nil})
 		if len(stack.data) != 1 {
 			t.Errorf("Expected one item on stack after %v, got %d: ", tt.name, len(stack.data))
 		}
@@ -916,7 +1106,7 @@ func TestOpMCopy(t *testing.T) {
 			mem.Resize(memorySize)
 		}
 		// Do the copy
-		opMcopy(&pc, evmInterpreter, &ScopeContext{mem, stack, nil})
+		opMcopy(&pc, evmInterpreter, &ScopeContext{mem, stack, nil, nil})
 		want := common.FromHex(strings.ReplaceAll(tc.want, " ", ""))
 		if have := mem.store; !bytes.Equal(want, have) {
 			t.Errorf("case %d: \nwant: %#x\nhave: %#x\n", i, want, have)

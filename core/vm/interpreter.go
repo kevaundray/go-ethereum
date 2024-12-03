@@ -43,6 +43,9 @@ type ScopeContext struct {
 	Memory   *Memory
 	Stack    *Stack
 	Contract *Contract
+
+	// TODO: change bigint terminology to modularArith or back to field
+	BigIntContexts *BigIntCtxAllocations
 }
 
 // MemoryData returns the underlying memory slice. Callers must not modify the contents
@@ -182,10 +185,12 @@ func (in *EVMInterpreter) Run(contract *Contract, input []byte, readOnly bool) (
 		op          OpCode        // current opcode
 		mem         = NewMemory() // bound memory
 		stack       = newstack()  // local stack
+		bigIntCtx   = newBigIntCtxAllocations()
 		callContext = &ScopeContext{
-			Memory:   mem,
-			Stack:    stack,
-			Contract: contract,
+			Memory:         mem,
+			Stack:          stack,
+			Contract:       contract,
+			BigIntContexts: bigIntCtx,
 		}
 		// For optimisation reason we're using uint64 as the program counter.
 		// It's theoretically possible to go above 2^64. The YP defines the PC

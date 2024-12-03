@@ -17,6 +17,7 @@
 package vm
 
 import (
+	"errors"
 	"math"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -227,6 +228,114 @@ func opSAR(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte
 	}
 	n := uint(shift.Uint64())
 	value.SRsh(value, n)
+	return nil, nil
+}
+
+func opSetupx(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	id, modOffset, modSize, allocSize := scope.Stack.pop(), scope.Stack.pop(), scope.Stack.pop(), scope.Stack.pop()
+	modulus := scope.Memory.GetCopy(modOffset.Uint64(), modSize.Uint64())
+	if err := scope.BigIntContexts.AllocateContextAndSetAsCurrent(uint(id.Uint64()), modulus, int(allocSize.Uint64())); err != nil {
+		return nil, err
+	}
+
+	return nil, nil
+}
+
+func opLoadx(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	if scope.BigIntContexts.currentContext == nil {
+		return nil, errors.New("current context is nil")
+	}
+	dest, source, count := scope.Stack.pop(), scope.Stack.pop(), scope.Stack.pop()
+
+	currentContext := scope.BigIntContexts.currentContext
+	elementSizeBytes := currentContext.ElementSizeBytes()
+
+	destBuf := scope.Memory.GetPtr(dest.Uint64(), count.Uint64()*elementSizeBytes)
+	return nil, currentContext.Load(destBuf, int(source.Uint64()), int(count.Uint64()))
+}
+
+func opStorex(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	if scope.BigIntContexts.currentContext == nil {
+		return nil, errors.New("current context is nil")
+	}
+	dest, source, count := scope.Stack.pop(), scope.Stack.pop(), scope.Stack.pop()
+
+	currentContext := scope.BigIntContexts.currentContext
+	elementSizeBytes := currentContext.ElementSizeBytes()
+
+	srcBuf := scope.Memory.GetPtr(source.Uint64(), count.Uint64()*elementSizeBytes)
+	return nil, currentContext.Store(uint(dest.Uint64()), uint(count.Uint64()), srcBuf)
+}
+
+func opAddmodx(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	code := scope.ContractCode()
+	codeLen := uint64(len(code))
+
+	// bounds checks
+	if *pc+1 >= codeLen || *pc+7 >= codeLen {
+		return nil, errors.New("program counter is out of bounds")
+	}
+
+	out := uint(scope.Contract.Code[*pc+1])
+	out_stride := uint(scope.Contract.Code[*pc+2])
+	x := uint(scope.Contract.Code[*pc+3])
+	x_stride := uint(scope.Contract.Code[*pc+4])
+	y := uint(scope.Contract.Code[*pc+5])
+	y_stride := uint(scope.Contract.Code[*pc+6])
+	count := uint(scope.Contract.Code[*pc+7])
+
+	*pc += 7
+
+	scope.BigIntContexts.currentContext.AddMod(out, out_stride, x, x_stride, y, y_stride, count)
+
+	return nil, nil
+}
+
+func opSubmodx(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	code := scope.ContractCode()
+	codeLen := uint64(len(code))
+
+	// bounds checks
+	if *pc+1 >= codeLen || *pc+7 >= codeLen {
+		return nil, errors.New("program counter is out of bounds")
+	}
+
+	out := uint(scope.Contract.Code[*pc+1])
+	out_stride := uint(scope.Contract.Code[*pc+2])
+	x := uint(scope.Contract.Code[*pc+3])
+	x_stride := uint(scope.Contract.Code[*pc+4])
+	y := uint(scope.Contract.Code[*pc+5])
+	y_stride := uint(scope.Contract.Code[*pc+6])
+	count := uint(scope.Contract.Code[*pc+7])
+
+	*pc += 7
+
+	scope.BigIntContexts.currentContext.SubMod(out, out_stride, x, x_stride, y, y_stride, count)
+
+	return nil, nil
+}
+
+func opMulmodx(pc *uint64, interpreter *EVMInterpreter, scope *ScopeContext) ([]byte, error) {
+	code := scope.ContractCode()
+	codeLen := uint64(len(code))
+
+	// bounds checks
+	if *pc+1 >= codeLen || *pc+7 >= codeLen {
+		return nil, errors.New("program counter is out of bounds")
+	}
+
+	out := uint(scope.Contract.Code[*pc+1])
+	out_stride := uint(scope.Contract.Code[*pc+2])
+	x := uint(scope.Contract.Code[*pc+3])
+	x_stride := uint(scope.Contract.Code[*pc+4])
+	y := uint(scope.Contract.Code[*pc+5])
+	y_stride := uint(scope.Contract.Code[*pc+6])
+	count := uint(scope.Contract.Code[*pc+7])
+
+	*pc += 7
+
+	scope.BigIntContexts.currentContext.MulMod(out, out_stride, x, x_stride, y, y_stride, count)
+
 	return nil, nil
 }
 

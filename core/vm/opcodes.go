@@ -211,6 +211,16 @@ const (
 	LOG4
 )
 
+// 0xc0 range - evmmax operations.
+const (
+	SETMODX OpCode = 0xc0
+	LOADX   OpCode = 0xc1
+	STOREX  OpCode = 0xc2
+	ADDMODX OpCode = 0xc3
+	SUBMODX OpCode = 0xc4
+	MULMODX OpCode = 0xc5
+)
+
 // 0xd0 range - eof operations.
 const (
 	DATALOAD  OpCode = 0xd0
@@ -414,6 +424,14 @@ var opCodeToString = [256]string{
 	LOG3: "LOG3",
 	LOG4: "LOG4",
 
+	// 0xc0 range - evmmax
+	SETMODX: "SETMODX",
+	LOADX:   "LOADX",
+	STOREX:  "STOREX",
+	ADDMODX: "ADDMODX",
+	SUBMODX: "SUBMODX",
+	MULMODX: "MULMODX",
+
 	// 0xd range - eof ops.
 	DATALOAD:  "DATALOAD",
 	DATALOADN: "DATALOADN",
@@ -601,6 +619,12 @@ var stringToOp = map[string]OpCode{
 	"LOG2":            LOG2,
 	"LOG3":            LOG3,
 	"LOG4":            LOG4,
+	"SETMODX":         SETMODX,
+	"LOADX":           LOADX,
+	"STOREX":          STOREX,
+	"ADDMODX":         ADDMODX,
+	"SUBMODX":         SUBMODX,
+	"MULMODX":         MULMODX,
 	"DATALOAD":        DATALOAD,
 	"DATALOADN":       DATALOADN,
 	"DATASIZE":        DATASIZE,
