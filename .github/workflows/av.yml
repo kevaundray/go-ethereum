@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+        with:
+          submodules: true
+          # For shallow clone, you can use: fetch-depth: 5
+
+      - name: Set up Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: '1.16'
+
+      - name: Update submodules
+        run: git submodule update --init --depth 1 --recursive
+
+      - name: Check Go version
+        run: go version
+
+      - name: Run build and tests on Linux
+        run: |
+          go run build/ci.go lint
+          go run build/ci.go check_tidy
+          go run build/ci.go check_generate
+          go run build/ci.go check_baddeps
+          go run build/ci.go install -dlgo
+          go run build/ci.go test -dlgo -short
+
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        arch: [amd64, 386]
+    env:
+      # Define base environment variables; adjust paths as needed
+      GETH_MINGW: 'C:\msys64\mingw64'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+        with:
+          submodules: true
+
+      - name: Set up MSYS2 (if required)
+        run: |
+          # Might need to install and configure MSYS2 on GitHub Windows runners if it’s not pre-installed.
+          echo "Ensure MSYS2 is set up and PATH is configured correctly."
+
+      - name: Configure environment for Windows build
+        run: |
+          echo %{{ matrix.arch }}%
+          REM Update GETH_MINGW if building for 386 architecture
+          IF "%{{ matrix.arch }}"=="386" (
+            set GETH_MINGW=C:\msys64\mingw32
+          )
+          set GETH_CC=%GETH_MINGW%\bin\gcc.exe
+          echo %GETH_CC%
+          %GETH_CC% --version
+
+      - name: Build on Windows
+        run: go run build/ci.go install -dlgo -arch %{{ matrix.arch }}% -cc %GETH_CC%
+
+    #   - name: Archive and package build
+    #     run: |
+    #       go run build/ci.go archive -arch %{{ matrix.arch }}% -type zip -signer WINDOWS_SIGNING_KEY -upload gethstore/builds
+    #       go run build/ci.go nsis -arch %{{ matrix.arch }}% -signer WINDOWS_SIGNING_KEY -upload gethstore/builds
+
+      - name: Run Windows tests
+        run: go run build/ci.go test -dlgo -arch %{{ matrix.arch }}% -cc %GETH_CC% -short
