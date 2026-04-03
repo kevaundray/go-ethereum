@@ -35,6 +35,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/eth/tracers/logger"
 	"github.com/ethereum/go-ethereum/eth/tracers/native"
@@ -99,27 +100,51 @@ func Transition(ctx *cli.Context) error {
 	// stdin input or in files.
 	// Check if anything needs to be read from stdin
 	var (
-		prestate  Prestate
-		txIt      txIterator // txs to apply
-		allocStr  = ctx.String(InputAllocFlag.Name)
-		btStr     = ctx.String(InputBTFlag.Name)
-		envStr    = ctx.String(InputEnvFlag.Name)
-		txStr     = ctx.String(InputTxsFlag.Name)
-		inputData = &input{}
+		prestate   Prestate
+		txIt       txIterator // txs to apply
+		allocStr   = ctx.String(InputAllocFlag.Name)
+		btStr      = ctx.String(InputBTFlag.Name)
+		envStr     = ctx.String(InputEnvFlag.Name)
+		txStr      = ctx.String(InputTxsFlag.Name)
+		inputData  = &input{}
+		useStateDB = ctx.IsSet(InputStateDBFlag.Name)
 	)
+
+	// Validate mutual exclusivity
+	if useStateDB && ctx.IsSet(InputAllocFlag.Name) {
+		return NewError(ErrorConfig, fmt.Errorf("--input.state-db and --input.alloc are mutually exclusive"))
+	}
+	// Validate state-diff/state-db-root require state-db
+	if !useStateDB && ctx.IsSet(InputStateDiffFlag.Name) {
+		return NewError(ErrorConfig, fmt.Errorf("--input.state-diff requires --input.state-db"))
+	}
+	if !useStateDB && ctx.IsSet(InputStateDBRootFlag.Name) {
+		return NewError(ErrorConfig, fmt.Errorf("--input.state-db-root requires --input.state-db"))
+	}
+
 	// Figure out the prestate alloc
-	if allocStr == stdinSelector || btStr == stdinSelector || envStr == stdinSelector || txStr == stdinSelector {
-		decoder := json.NewDecoder(os.Stdin)
-		if err := decoder.Decode(inputData); err != nil {
-			return NewError(ErrorJson, fmt.Errorf("failed unmarshalling stdin: %v", err))
+	if !useStateDB {
+		if allocStr == stdinSelector || btStr == stdinSelector || envStr == stdinSelector || txStr == stdinSelector {
+			decoder := json.NewDecoder(os.Stdin)
+			if err := decoder.Decode(inputData); err != nil {
+				return NewError(ErrorJson, fmt.Errorf("failed unmarshalling stdin: %v", err))
+			}
+		}
+		if allocStr != stdinSelector {
+			if err := readFile(allocStr, "alloc", &inputData.Alloc); err != nil {
+				return err
+			}
+		}
+		prestate.Pre = inputData.Alloc
+	} else {
+		// In state-db mode, only read env and txs from stdin if needed
+		if envStr == stdinSelector || txStr == stdinSelector {
+			decoder := json.NewDecoder(os.Stdin)
+			if err := decoder.Decode(inputData); err != nil {
+				return NewError(ErrorJson, fmt.Errorf("failed unmarshalling stdin: %v", err))
+			}
 		}
 	}
-	if allocStr != stdinSelector {
-		if err := readFile(allocStr, "alloc", &inputData.Alloc); err != nil {
-			return err
-		}
-	}
-	prestate.Pre = inputData.Alloc
 
 	if btStr != stdinSelector && btStr != "" {
 		if err := readFile(btStr, "BT", &inputData.BT); err != nil {
@@ -207,8 +232,42 @@ func Transition(ctx *cli.Context) error {
 	} else if tracer != nil {
 		vmConfig.Tracer = tracer.Hooks
 	}
+	// Open state-db and load state-diff overlays if in state-db mode
+	var (
+		kvdb          ethdb.Database
+		externalState *state.StateDB
+	)
+	if useStateDB {
+		stateDBPath := ctx.String(InputStateDBFlag.Name)
+
+		// Load state-diff overlays (one per previous block, applied in order)
+		var stateDiffs []types.GenesisAlloc
+		if ctx.IsSet(InputStateDiffFlag.Name) {
+			for _, diffPath := range ctx.StringSlice(InputStateDiffFlag.Name) {
+				var diff types.GenesisAlloc
+				if err := readFile(diffPath, "state-diff", &diff); err != nil {
+					return err
+				}
+				stateDiffs = append(stateDiffs, diff)
+			}
+		}
+
+		// Parse expected root if provided
+		var expectedRoot *common.Hash
+		if ctx.IsSet(InputStateDBRootFlag.Name) {
+			root := common.HexToHash(ctx.String(InputStateDBRootFlag.Name))
+			expectedRoot = &root
+		}
+
+		externalState, kvdb, err = MakePreStateFromDB(stateDBPath, stateDiffs, expectedRoot)
+		if err != nil {
+			return NewError(ErrorConfig, err)
+		}
+		defer kvdb.Close()
+	}
+
 	// Run the test and aggregate the result
-	s, result, body, err := prestate.Apply(vmConfig, chainConfig, txIt, ctx.Int64(RewardFlag.Name))
+	s, result, body, err := prestate.Apply(vmConfig, chainConfig, txIt, ctx.Int64(RewardFlag.Name), externalState)
 	if err != nil {
 		return err
 	}
@@ -228,17 +287,28 @@ func Transition(ctx *cli.Context) error {
 		collector = make(Alloc)
 		btleaves  map[common.Hash]hexutil.Bytes
 	)
-	isBinary := chainConfig.IsVerkle(big.NewInt(int64(prestate.Env.Number)), prestate.Env.Timestamp)
-	if !isBinary {
-		s.DumpToCollector(collector, nil)
+	if useStateDB {
+		// Since input state-diffs were committed before execution,
+		// dirty tracking only contains this block's changes.
+		CollectDirtyAccounts(s, collector)
 	} else {
-		btleaves = make(map[common.Hash]hexutil.Bytes)
-		if err := s.DumpBinTrieLeaves(btleaves); err != nil {
-			return err
+		isBinary := chainConfig.IsVerkle(big.NewInt(int64(prestate.Env.Number)), prestate.Env.Timestamp)
+		if !isBinary {
+			s.DumpToCollector(collector, nil)
+		} else {
+			btleaves = make(map[common.Hash]hexutil.Bytes)
+			if err := s.DumpBinTrieLeaves(btleaves); err != nil {
+				return err
+			}
 		}
 	}
 
-	return dispatchOutput(ctx, baseDir, result, collector, body, btleaves)
+	// Dispatch output
+	allocFlagName := OutputAllocFlag.Name
+	if useStateDB {
+		allocFlagName = OutputStateDiffFlag.Name
+	}
+	return dispatchOutput(ctx, baseDir, allocFlagName, result, collector, body, btleaves)
 }
 
 func applyLondonChecks(env *stEnv, chainConfig *params.ChainConfig) error {
@@ -359,8 +429,8 @@ func saveFile(baseDir, filename string, data interface{}) error {
 }
 
 // dispatchOutput writes the output data to either stderr or stdout, or to the specified
-// files
-func dispatchOutput(ctx *cli.Context, baseDir string, result *ExecutionResult, alloc Alloc, body hexutil.Bytes, bt map[common.Hash]hexutil.Bytes) error {
+// files. allocFlagName determines which CLI flag provides the alloc/state-diff output path.
+func dispatchOutput(ctx *cli.Context, baseDir string, allocFlagName string, result *ExecutionResult, alloc Alloc, body hexutil.Bytes, bt map[common.Hash]hexutil.Bytes) error {
 	stdOutObject := make(map[string]interface{})
 	stdErrObject := make(map[string]interface{})
 	dispatch := func(baseDir, fName, name string, obj interface{}) error {
@@ -378,7 +448,7 @@ func dispatchOutput(ctx *cli.Context, baseDir string, result *ExecutionResult, a
 		}
 		return nil
 	}
-	if err := dispatch(baseDir, ctx.String(OutputAllocFlag.Name), "alloc", alloc); err != nil {
+	if err := dispatch(baseDir, ctx.String(allocFlagName), "alloc", alloc); err != nil {
 		return err
 	}
 	if err := dispatch(baseDir, ctx.String(OutputResultFlag.Name), "result", result); err != nil {

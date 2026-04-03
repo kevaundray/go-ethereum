@@ -35,11 +35,14 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto/keccak"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/triedb"
+	"github.com/ethereum/go-ethereum/triedb/hashdb"
+	"github.com/ethereum/go-ethereum/triedb/pathdb"
 	"github.com/holiman/uint256"
 )
 
@@ -129,8 +132,10 @@ type rejectedTx struct {
 	Err   string `json:"error"`
 }
 
-// Apply applies a set of transactions to a pre-state
-func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig, txIt txIterator, miningReward int64) (*state.StateDB, *ExecutionResult, []byte, error) {
+// Apply applies a set of transactions to a pre-state.
+// If externalState is non-nil, it is used as the initial state instead of
+// creating one from pre.Pre (used for --input.state-db mode).
+func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig, txIt txIterator, miningReward int64, externalState *state.StateDB) (*state.StateDB, *ExecutionResult, []byte, error) {
 	// Capture errors for BLOCKHASH operation, if we haven't been supplied the
 	// required blockhashes
 	var hashError error
@@ -145,9 +150,14 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig, 
 		}
 		return h
 	}
+	isEIP4762 := chainConfig.IsVerkle(big.NewInt(int64(pre.Env.Number)), pre.Env.Timestamp)
+	var statedb *state.StateDB
+	if externalState != nil {
+		statedb = externalState
+	} else {
+		statedb = MakePreState(rawdb.NewMemoryDatabase(), pre.Pre, isEIP4762)
+	}
 	var (
-		isEIP4762   = chainConfig.IsVerkle(big.NewInt(int64(pre.Env.Number)), pre.Env.Timestamp)
-		statedb     = MakePreState(rawdb.NewMemoryDatabase(), pre.Pre, isEIP4762)
 		signer      = types.MakeSigner(chainConfig, new(big.Int).SetUint64(pre.Env.Number), pre.Env.Timestamp)
 		gaspool     = core.NewGasPool(pre.Env.GasLimit)
 		blockHash   = common.Hash{0x13, 0x37}
@@ -368,12 +378,21 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig, 
 		execRs.Requests = requests
 	}
 
+	body, _ := rlp.EncodeToBytes(includedTxs)
+
+	// In state-db mode (external state), return the statedb before reopen
+	// so that dirty tracking (stateObjects, pendingStorage, dirtyStorage)
+	// is preserved for CollectDirtyAccounts. The state root is already
+	// captured in execRs.StateRoot.
+	if externalState != nil {
+		return statedb, execRs, body, nil
+	}
+
 	// Re-create statedb instance with new root for MPT mode
 	statedb, err = state.New(root, statedb.Database())
 	if err != nil {
 		return nil, nil, nil, NewError(ErrorEVM, fmt.Errorf("could not reopen state: %v", err))
 	}
-	body, _ := rlp.EncodeToBytes(includedTxs)
 	return statedb, execRs, body, nil
 }
 
@@ -412,6 +431,133 @@ func MakePreState(db ethdb.Database, accounts types.GenesisAlloc, isBintrie bool
 		panic(fmt.Errorf("failed to reopen state after commit: %v", err))
 	}
 	return statedb
+}
+
+// MakePreStateFromDB opens an existing database at dbPath read-only and creates
+// a StateDB from the latest state root. If stateDiffs are provided, they are
+// applied in order as overlays on top of the DB state, then committed so that
+// dirty tracking is reset before execution begins.
+func MakePreStateFromDB(dbPath string, stateDiffs []types.GenesisAlloc, expectedRoot *common.Hash) (*state.StateDB, ethdb.Database, error) {
+	// Open PebbleDB read-only, then wrap with an in-memory overlay so
+	// that all writes (trie nodes, contract code) go to memory and the
+	// snapshot on disk is never modified.
+	pdb, err := pebble.New(dbPath, 512, 64, "", true)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to open pebble db: %v", err)
+	}
+	odb := newOverlayDB(pdb)
+	kvdb, err := rawdb.Open(odb, rawdb.OpenOptions{})
+	if err != nil {
+		pdb.Close()
+		return nil, nil, fmt.Errorf("failed to open state db: %v", err)
+	}
+	// Find the latest state root from the head block
+	headHash := rawdb.ReadHeadBlockHash(kvdb)
+	if headHash == (common.Hash{}) {
+		kvdb.Close()
+		return nil, nil, fmt.Errorf("no head block found in database")
+	}
+	headNum, ok := rawdb.ReadHeaderNumber(kvdb, headHash)
+	if !ok {
+		kvdb.Close()
+		return nil, nil, fmt.Errorf("head block number not found for hash %v", headHash)
+	}
+	header := rawdb.ReadHeader(kvdb, headHash, headNum)
+	if header == nil {
+		kvdb.Close()
+		return nil, nil, fmt.Errorf("header not found for head block %d", headNum)
+	}
+	root := header.Root
+
+	// Verify state root if expected root was provided
+	if expectedRoot != nil && root != *expectedRoot {
+		kvdb.Close()
+		return nil, nil, fmt.Errorf("state root mismatch: db has %v, expected %v", root, *expectedRoot)
+	}
+
+	// Auto-detect the state scheme (hash vs path) from the DB.
+	// Use ReadOnly config for pathdb to avoid journal/history repairs.
+	var tdbConfig *triedb.Config
+	scheme := rawdb.ReadStateScheme(kvdb)
+	if scheme == rawdb.PathScheme {
+		tdbConfig = &triedb.Config{Preimages: true, PathDB: pathdb.ReadOnly}
+	} else {
+		tdbConfig = &triedb.Config{Preimages: true, HashDB: hashdb.Defaults}
+	}
+	tdb := triedb.NewDatabase(kvdb, tdbConfig)
+	sdb := state.NewDatabase(tdb, nil)
+	statedb, err := state.New(root, sdb)
+	if err != nil {
+		kvdb.Close()
+		return nil, nil, fmt.Errorf("failed to open state at root %v: %v", root, err)
+	}
+
+	// Apply state-diff overlays in order. All fields are set
+	// unconditionally — a zero nonce or nil balance in a state-diff
+	// means "set to zero," not "skip."
+	for _, diff := range stateDiffs {
+		for addr, a := range diff {
+			statedb.SetCode(addr, a.Code, tracing.CodeChangeUnspecified)
+			statedb.SetNonce(addr, a.Nonce, tracing.NonceChangeUnspecified)
+			balance := a.Balance
+			if balance == nil {
+				balance = new(big.Int)
+			}
+			statedb.SetBalance(addr, uint256.MustFromBig(balance), tracing.BalanceChangeUnspecified)
+			for k, v := range a.Storage {
+				statedb.SetState(addr, k, v)
+			}
+		}
+	}
+	// Commit and reopen so that dirty tracking is reset. After this,
+	// only changes from block execution will appear as dirty state.
+	if len(stateDiffs) > 0 {
+		root, err = statedb.Commit(0, false, false)
+		if err != nil {
+			kvdb.Close()
+			return nil, nil, fmt.Errorf("failed to commit state-diff overlay: %v", err)
+		}
+		statedb, err = state.New(root, sdb)
+		if err != nil {
+			kvdb.Close()
+			return nil, nil, fmt.Errorf("failed to reopen state after overlay commit: %v", err)
+		}
+	}
+	return statedb, kvdb, nil
+}
+
+// CollectDirtyAccounts dumps only accounts modified during execution into the
+// collector. Since input state-diffs are committed before execution, the dirty
+// tracking in StateDB only contains this block's changes.
+func CollectDirtyAccounts(s *state.StateDB, collector Alloc) {
+	for _, addr := range s.GetLoadedAddresses() {
+		dirtySlots := s.GetDirtyStorage(addr)
+		// Check if this account was actually modified (not just read).
+		// An account is considered modified if it has dirty storage or
+		// if its balance/nonce/code were changed during execution.
+		// Since we committed before execution, any loaded account with
+		// mutations will have pending/dirty state.
+		//
+		// For now, include all loaded accounts. This is slightly
+		// over-inclusive (includes reads) but correct. A more precise
+		// filter would require tracking original values.
+		if s.Empty(addr) && !s.Exist(addr) {
+			collector[addr] = types.Account{}
+			continue
+		}
+		account := types.Account{
+			Nonce:   s.GetNonce(addr),
+			Balance: s.GetBalance(addr).ToBig(),
+			Code:    s.GetCode(addr),
+		}
+		if len(dirtySlots) > 0 {
+			account.Storage = make(map[common.Hash]common.Hash, len(dirtySlots))
+			for slot, value := range dirtySlots {
+				account.Storage[slot] = value
+			}
+		}
+		collector[addr] = account
+	}
 }
 
 func rlpHash(x any) (h common.Hash) {

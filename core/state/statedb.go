@@ -420,6 +420,39 @@ func (s *StateDB) Reader() Reader {
 	return s.reader
 }
 
+// GetLoadedAddresses returns all addresses that have been loaded into this
+// StateDB instance (read or modified). This is useful for determining which
+// accounts were touched during execution.
+func (s *StateDB) GetLoadedAddresses() []common.Address {
+	addrs := make([]common.Address, 0, len(s.stateObjects))
+	for addr := range s.stateObjects {
+		addrs = append(addrs, addr)
+	}
+	return addrs
+}
+
+// GetDirtyStorage returns the storage slots that have been modified for the
+// given address within the current block. Returns nil if the address has not
+// been loaded or has no dirty storage.
+func (s *StateDB) GetDirtyStorage(addr common.Address) map[common.Hash]common.Hash {
+	obj, ok := s.stateObjects[addr]
+	if !ok {
+		return nil
+	}
+	if len(obj.pendingStorage) == 0 && len(obj.dirtyStorage) == 0 {
+		return nil
+	}
+	// Merge pending (committed within block) and dirty (current tx) storage
+	result := make(map[common.Hash]common.Hash, len(obj.pendingStorage)+len(obj.dirtyStorage))
+	for k, v := range obj.pendingStorage {
+		result[k] = v
+	}
+	for k, v := range obj.dirtyStorage {
+		result[k] = v
+	}
+	return result
+}
+
 func (s *StateDB) HasSelfDestructed(addr common.Address) bool {
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {

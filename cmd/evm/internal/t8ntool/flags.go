@@ -101,6 +101,23 @@ var (
 		Usage: "`stdin` or file name of where to find the prestate alloc to use.",
 		Value: "alloc.json",
 	}
+	InputStateDBFlag = &cli.StringFlag{
+		Name:  "input.state-db",
+		Usage: "Path to a client state database directory. Mutually exclusive with --input.alloc. t8n reads state from this DB (read-only).",
+	}
+	InputStateDiffFlag = &cli.StringSliceFlag{
+		Name:  "input.state-diff",
+		Usage: "Partial state overlay(s) on top of --input.state-db. Can be specified multiple times, applied in order. Only valid when --input.state-db is present.",
+	}
+	InputStateDBRootFlag = &cli.StringFlag{
+		Name:  "input.state-db-root",
+		Usage: "Expected state root of the snapshot DB. Only valid when --input.state-db is present. Verifies before executing.",
+	}
+	OutputStateDiffFlag = &cli.StringFlag{
+		Name:  "output.state-diff",
+		Usage: "Where to write the cumulative state diff after execution. Only valid when --input.state-db is present.",
+		Value: "state-diff.json",
+	}
 	InputEnvFlag = &cli.StringFlag{
 		Name:  "input.env",
 		Usage: "`stdin` or file name of where to find the prestate env to use.",
